@@ -12,3 +12,4 @@ adb logcat -s FirebaseCrashlytics
 4. Performance Monitoring 调试
 adb logcat -s FirebasePerformance
 5. RemoteConfig 需要翻墙才能初始化成功
+6. Admob，插屏和激励视频都是需要单独起一个Activity，可能会造成主Activity暂停渲染导致错误
