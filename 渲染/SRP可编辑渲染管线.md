@@ -288,9 +288,147 @@ Look Dev 只在编辑器下有用 而且必须使用HDRP 的HDRI材质
     }
     ~~~
 6. 加入点光源(Point Light)
-  https://zhuanlan.zhihu.com/p/102989404
+  - 在C#端加入
+    ~~~
+    private void CalcPointLight(VisibleLight[] lights)
+      {
+          //点光方向数组
+          var PLightPos = new Vector4[maxPointLights];
+          //点光颜色数组
+          var PLightColors = new Vector4[maxPointLights];
+
+          // //将shader中需要的属性参数映射为ID，加速传参
+          var _PLightPos = Shader.PropertyToID("_PLightPos");
+          var _PLightColor = Shader.PropertyToID("_PLightColor");  
+          var count = 0;
+          for (int i = 0; i < lights.Length; i++)
+          {
+              if (lights[i].lightType != LightType.Point) continue;
+              if (count < maxPointLights)
+              {
+                  // //获取灯光参数,平行光朝向即为灯光Z轴方向。矩阵第一到三列分别为xyz轴项，第四列为位置。//2为z的轴向
+                  var lightpos = lights[i].localToWorldMatrix.GetColumn(3);
+
+                  //这边获取的灯光的finalColor是灯光颜色乘上强度之后的值，也正好是shader需要的值
+                  PLightColors[count] = lights[i].finalColor;
+                  //第四个项为光的范围
+                  PLightColors[count].w = lights[i].range;
+                  PLightPos[count] = lightpos;
+
+                  count++;
+              }else
+                  break;
+          }
+
+          //利用CommandBuffer进行参数传递。
+          _cb.SetGlobalVectorArray(_PLightPos, PLightPos);
+          _cb.SetGlobalVectorArray(_PLightColor, PLightColors);
+      }
+    ~~~
+  - 在Shader中加入
+    ~~~
+    //定义最多4盏点光
+  	#define MAX_POINT_LIGHTS 4
+  	half4 _PLightPos[MAX_POINT_LIGHTS];
+  	fixed4 _PLightColor[MAX_POINT_LIGHTS];
+
+    half4 frag(v2f i) : SV_Target
+    {
+      //像素管线中计算点光源光照
+      half3 pLight = 0;
+      for (int n = 0; n < MAX_POINT_LIGHTS; n++)
+      {
+        fixed specular = 0;
+        half3 pLightVector = _PLightPos[n].xyz - i.worldPos;
+        half3 pLightDir = normalize(pLightVector);
+        //距离平方，用于计算点光衰减
+        half distanceSqr = max(dot(pLightVector, pLightVector), 0.00001);
+        //点光衰减公式pow(max(1 - pow((distance*distance/range*range),2),0),2)
+        half pLightAttenuation = pow(max(1 - pow((distanceSqr / (_PLightColor[n].a * _PLightColor[n].a)), 2),0), 2);
+
+        half3 halfDir = normalize(viewDir + pLightDir);
+        specular = pow(saturate(dot(i.normal, halfDir)), _SpecularPow);
+        pLight += (1 + specular) * saturate(dot(i.normal, pLightDir)) * _PLightColor[n].rgb * pLightAttenuation;
+      }
+      //颜色的叠加,平行光与点光源叠加
+      fragColor.rgb *=  (dLight + pLight);
+    }
+
+    ~~~
 7. 加入聚光灯(Spot Light)
-  https://zhuanlan.zhihu.com/p/111691414
+  - 在C#端加入
+    ~~~
+    private void CalcSpotLight(VisibleLight[] lights)
+    {
+        var SLightPos = new Vector4[maxSpotLights];
+        var SLightColors = new Vector4[maxSpotLights];
+        var SLightDirections = new Vector4[maxSpotLights];
+
+        var _SLightPos = Shader.PropertyToID("_SLightPos");
+        var _SLightColor = Shader.PropertyToID("_SLightColor");
+        var _SLightDir = Shader.PropertyToID("_SLightDir");
+        var count = 0;
+
+        for (int i = 0; i < lights.Length; i++)
+        {
+            if (lights[i].lightType != LightType.Spot) continue;
+            if (count < maxSpotLights)
+            {
+                var lightDir = -lights[i].localToWorldMatrix.GetColumn(2);
+                var lightpos = lights[i].localToWorldMatrix.GetColumn(3);
+
+                SLightColors[count] = lights[i].finalColor;
+                SLightColors[count].w = lights[i].range;
+                SLightDirections[count] = lightDir;
+
+                //外角弧度-unity中设置的角度为外角全角，我们之取半角进行计算
+                float outerRad = Mathf.Deg2Rad * 0.5f * lights[i].spotAngle;
+                //外角弧度cos值和tan值
+                float outerCos = Mathf.Cos(outerRad);
+                float outerTan = Mathf.Tan(outerRad);
+                //内角弧度计算-设定内角tan值为外角tan值的46/64
+                float innerRad = Mathf.Atan(((46f / 64f) * outerTan));
+                //内角弧度cos值
+                float innerCos = Mathf.Cos(innerRad);
+                SLightPos[count] = lightpos;
+                //角度计算用的cos(ro)与cos(ri) - cos(ro)分别存入方向与位置的w分量
+                SLightDirections[count].w = outerCos;
+                SLightPos[count].w = innerCos - outerCos;
+                count++;
+            }else
+                break;
+        }
+        //利用CommandBuffer进行参数传递
+        _cb.SetGlobalVectorArray(_SLightPos, SLightPos);
+        _cb.SetGlobalVectorArray(_SLightColor, SLightColors);
+        _cb.SetGlobalVectorArray(_SLightDir, SLightDirections);
+    }
+    ~~~
+  - 在Shader端加入
+    ~~~
+    //像素管线中计算聚光灯
+		half3 sLight = 0;
+		for (int n = 0; n < MAX_SPOT_LIGHTS; n++)
+		{
+		    fixed specular = 0;
+		    //灯光到受光物体矢量，类似点光方向
+		    half3 sLightVector = _SLightPos[n].xyz - i.worldPos;
+		    //聚光灯朝向
+		    half3 sLightDir = normalize(_SLightDir[n].xyz);
+		    //距离平方，与点光的距离衰减计算一样
+		    half distanceSqr = max(dot(sLightVector, sLightVector), 0.00001);
+		    //距离衰减公式同点光pow(max(1 - pow((distance*distance/range*range),2),0),2)
+		    half rangeAttenuation = pow(max(1 - pow((distanceSqr / (_SLightColor[n].a * _SLightColor[n].a)), 2), 0), 2);
+		    //灯光物体矢量与照射矢量点积
+		    float spotCos = saturate(dot(normalize(sLightVector), sLightDir));
+		    //角度衰减公式
+		    float spotAttenuation = saturate((spotCos - _SLightDir[n].w) / _SLightPos[n].w);
+
+		    half3 halfDir = normalize(viewDir + sLightDir);
+		    specular = pow(saturate(dot(i.normal, halfDir)), _SpecularPow);
+		    sLight += (1 + specular) * saturate(dot(i.normal, sLightDir)) * _SLightColor[n].rgb * rangeAttenuation * spotAttenuation * spotAttenuation;
+		}
+    ~~~
 8. CommandBuffer的深入理解
   https://zhuanlan.zhihu.com/p/111691414
 9. 平行光阴影(阴影计算原理)
@@ -338,6 +476,14 @@ UnityEngine.Rendering 包中的类
 8. ShaderTagId 着色器标签ID用于引用着色器中的各种名称。
 9. SortingSettings 此结构描述在渲染期间对对象排序的方法。
 10. VisibleLight 保留可见光源的数据
+
+----------------------------------------------------------------------------------------------------------------
+101. CameraEvent 在摄像机的渲染中定义一个用来附加CommandBuffer对象的位置
+102. ScriptableCullingParameters
+
+
+## 其他相关
+1. CameraClearFlags
 
 
 
